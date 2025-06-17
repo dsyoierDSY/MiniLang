@@ -11,9 +11,10 @@ MiniLang 是一种功能丰富、易于学习的编程语言，旨在为开发�
 var message = "Hello, MiniLang!";
 print(message);
 ```
-你可以使用 MiniLang 解释器运行该程序，后续会提供具体运行指令。
+你可以使用 MiniLang 解释器运行该程序，目前，解释器是MiniLang.cpp，请你在main函数中找到 `std::string_view program = ` 语句，在 `R"CODE(` 与 `)CODE";` 之间直接粘贴你的代码。
 
 ## 语言特性
+最详细的语言特性在 MiniLangDoc.md 中可见。
 - **丰富的字面量类型**：支持整数、浮点数、字符串、布尔值、数组、字典和空值字面量。
 ```minilang
 var num = 123;
