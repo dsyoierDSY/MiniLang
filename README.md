@@ -12,6 +12,7 @@ var message = "Hello, MiniLang!";
 print(message);
 ```
 你可以使用 MiniLang 解释器运行该程序，目前，解释器是MiniLang.cpp，请你在main函数中找到 `std::string_view program = ` 语句，在 `R"CODE(` 与 `)CODE";` 之间直接粘贴你的代码。
+我们承诺会在今后的版本中推出解释器和编译器（后者可能需要较长时间）。
 
 ## 语言特性
 最详细的语言特性在 MiniLangDoc.md 中可见。
