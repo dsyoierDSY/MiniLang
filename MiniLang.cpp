@@ -16,9 +16,9 @@
 #include <chrono>
 #include <exception>
 #include <set>
-
+#include <string>
 template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-template<class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
+template<class... Ts> overloaded(Ts...) -> overloaded<Ts...>; 
 
 // ===================================================================
 // 1. 异常类型
@@ -37,7 +37,7 @@ class ContinueSignal : public std::exception {};
 // 2. 前置声明与辅助结构
 // ===================================================================
 enum class TokenType;
-class Value;
+class Value; // Value 的前置声明依然有用
 class Environment;
 class Callable;
 class ClassValue;
@@ -49,6 +49,7 @@ struct FuncStmt;
 struct MemberAccessExpr;
 struct DictLiteralExpr;
 struct VarExpr;
+struct FuncLiteralExpr;
 
 // Wrappers to break recursive dependency in std::variant
 struct ArrayValue;
@@ -83,6 +84,8 @@ enum class TokenType {
     LBRACE, RBRACE, LPAREN, RPAREN, COMMA, LBRACKET, RBRACKET, COLON, DOT,
     SEMICOLON,
     INT, FLOAT, BOOL, STRING, ARRAY, DICT, OBJECT,
+    TRY, CATCH, THROW,
+    IMPORT, INCLUDE, AS, // 新增
     END
 };
 
@@ -117,6 +120,8 @@ public:
         return tokens;
     }
 private:
+    // ... isAtEnd, advance, peek, peekNext, match, addToken, stringLiteral, number 函数保持不变 ...
+
     bool isAtEnd() const { return current >= source.size(); }
     char advance() { return source[current++]; }
     char peek() const { return current < source.size() ? source[current] : '\0'; }
@@ -233,7 +238,9 @@ private:
             {"class", TokenType::CLASS}, {"this", TokenType::THIS}, {"super", TokenType::SUPER}, {"extends", TokenType::EXTENDS},
             {"int", TokenType::INT}, {"float", TokenType::FLOAT},
             {"bool", TokenType::BOOL}, {"string", TokenType::STRING}, {"array", TokenType::ARRAY},
-            {"dict", TokenType::DICT}, {"object", TokenType::OBJECT}
+            {"dict", TokenType::DICT}, {"object", TokenType::OBJECT},
+            {"try", TokenType::TRY}, {"catch", TokenType::CATCH}, {"throw", TokenType::THROW},
+            {"import", TokenType::IMPORT}, {"include", TokenType::INCLUDE}, {"as", TokenType::AS} // 新增
         };
         if (auto it = keywords.find(text); it != keywords.end()) {
             addToken(it->second, tokens);
@@ -242,7 +249,6 @@ private:
         }
     }
 };
-
 // ===================================================================
 // 4. 动态类型系统
 // ===================================================================
@@ -335,6 +341,15 @@ public:
     bool operator!=(const Value& other) const {
         return data != other.data;
     }
+};
+
+// ===================================================================
+// FIX: ThrowSignal 定义被移动到 Value 之后
+// ===================================================================
+class ThrowSignal : public std::exception {
+public:
+    const Value thrown_value;
+    explicit ThrowSignal(Value val) : thrown_value(std::move(val)) {}
 };
 
 struct ArrayValue {
@@ -456,7 +471,6 @@ struct VariableInfo {
     Value value;
     std::optional<TokenType> static_type;
 };
-
 class Environment : public std::enable_shared_from_this<Environment> {
     std::unordered_map<std::string, VariableInfo> variables;
     std::shared_ptr<Environment> parent;
@@ -514,8 +528,20 @@ public:
         if (parent) return parent->assign(name, value);
         return false;
     }
-};
 
+    const std::unordered_map<std::string, VariableInfo>& get_all_variables() const {
+        return variables;
+    }
+
+    // 新增：获取全局环境
+    std::shared_ptr<Environment> getGlobal() {
+        std::shared_ptr<Environment> current = shared_from_this();
+        while (current->parent) {
+            current = current->parent;
+        }
+        return current;
+    }
+};
 
 // ===================================================================
 // 5. 抽象语法树 (AST)
@@ -588,6 +614,13 @@ struct MemberAccessExpr final : Expr {
     Token member;
     MemberAccessExpr(ExprPtr obj, Token mem, int ln)
         : Expr(ln), object(std::move(obj)), member(std::move(mem)) {}
+    Value eval(Environment& env) const override;
+};
+struct FuncLiteralExpr final : Expr {
+    std::vector<ParamInfo> params;
+    std::unique_ptr<BlockStmt> body;
+    FuncLiteralExpr(std::vector<ParamInfo> p, std::unique_ptr<BlockStmt> b, int ln)
+        : Expr(ln), params(std::move(p)), body(std::move(b)) {}
     Value eval(Environment& env) const override;
 };
 struct ThisExpr final : Expr {
@@ -686,7 +719,34 @@ struct ContinueStmt final : Stmt {
         throw ContinueSignal();
     }
 };
+struct ThrowStmt final : Stmt {
+    ExprPtr expr;
+    explicit ThrowStmt(ExprPtr e, int ln) : Stmt(ln), expr(std::move(e)) {}
+    std::optional<Value> exec(Environment& env) const override;
+};
+struct TryStmt final : Stmt {
+    StmtPtr try_block;
+    Token catch_variable;
+    StmtPtr catch_block;
+    TryStmt(StmtPtr try_b, Token catch_v, StmtPtr catch_b, int ln)
+        : Stmt(ln), try_block(std::move(try_b)), catch_variable(std::move(catch_v)), catch_block(std::move(catch_b)) {}
+    std::optional<Value> exec(Environment& env) const override;
+};
+struct IncludeStmt final : Stmt {
+    ExprPtr path;
+    IncludeStmt(ExprPtr p, int ln) : Stmt(ln), path(std::move(p)) {}
+    std::optional<Value> exec(Environment& env) const override;
+};
 
+struct ImportStmt final : Stmt {
+    ExprPtr path;
+    Token alias;
+    ImportStmt(ExprPtr p, Token a, int ln) : Stmt(ln), path(std::move(p)), alias(std::move(a)) {}
+    std::optional<Value> exec(Environment& env) const override;
+};
+// ===================================================================
+// 6. AST 节点与辅助函数实现
+// ===================================================================
 // ===================================================================
 // 6. AST 节点与辅助函数实现
 // ===================================================================
@@ -802,7 +862,6 @@ bool check_type(TokenType expected, const Value& val) {
     return false;
 }
 
-// --- 完全重构的 AssignExpr::eval ---
 Value AssignExpr::eval(Environment& env) const {
     Value valToAssign = value->eval(env);
 
@@ -1187,6 +1246,10 @@ Value MemberAccessExpr::eval(Environment& env) const {
     }
     throw RuntimeError(line, "Can only access properties on objects or dicts.");
 }
+Value FuncLiteralExpr::eval(Environment& env) const {
+    auto func = std::make_shared<FunctionValue>(params, body.get(), env.shared_from_this());
+    return Value(std::static_pointer_cast<Callable>(func));
+}
 std::optional<Value> BlockStmt::exec(Environment& env) const {
     auto blockEnv = std::make_shared<Environment>(env.shared_from_this());
     for (const auto& stmt : statements) {
@@ -1376,6 +1439,36 @@ std::optional<Value> ForStmt::exec(Environment& env) const {
     return std::nullopt;
 }
 
+std::optional<Value> ThrowStmt::exec(Environment& env) const {
+    throw ThrowSignal(expr->eval(env));
+    return std::nullopt; // Unreachable
+}
+
+std::optional<Value> TryStmt::exec(Environment& env) const {
+    try {
+        if (auto retVal = try_block->exec(env); retVal.has_value()) {
+            return retVal;
+        }
+    } catch (const ThrowSignal& signal) {
+        // 这个块处理来自脚本 'throw' 关键字的异常
+        auto catch_env = std::make_shared<Environment>(env.shared_from_this());
+        catch_env->define(catch_variable.lexeme, signal.thrown_value, std::nullopt);
+        return catch_block->exec(*catch_env);
+    } catch (const RuntimeError& e) {
+        // 新增：这个块处理解释器内部的运行时错误
+        auto catch_env = std::make_shared<Environment>(env.shared_from_this());
+        
+        // 创建一个错误对象，包含消息和行号，并传递给脚本的 catch 块
+        auto error_obj = std::make_shared<MutableObject>();
+        error_obj->set("message", Value(std::string(e.what())));
+        error_obj->set("line", Value(e.line));
+
+        catch_env->define(catch_variable.lexeme, Value(error_obj), std::nullopt);
+        return catch_block->exec(*catch_env);
+    }
+    return std::nullopt;
+}
+
 // ===================================================================
 // 7. 语法分析器 (Parser)
 // ===================================================================
@@ -1392,6 +1485,7 @@ public:
         return statements;
     }
 private:
+    // ... match, consume, advance, isAtEnd, peek, previous, check, checkAhead, synchronize 函数保持不变 ...
     bool match(std::initializer_list<TokenType> types) {
         for (TokenType type : types) {
             if (check(type)) {
@@ -1431,17 +1525,25 @@ private:
                 case TokenType::BREAK: case TokenType::CONTINUE:
                 case TokenType::INT: case TokenType::FLOAT: case TokenType::BOOL:
                 case TokenType::STRING: case TokenType::ARRAY: case TokenType::DICT:
-                case TokenType::OBJECT:
+                case TokenType::OBJECT: case TokenType::TRY: case TokenType::THROW:
+                case TokenType::IMPORT: case TokenType::INCLUDE: // 新增
                     return;
                 default: break;
             }
             advance();
         }
     }
+
+
     StmtPtr parseDeclaration() {
         try {
+            if (match({TokenType::IMPORT})) return parseImportStatement(); // 新增
+            if (match({TokenType::INCLUDE})) return parseIncludeStatement(); // 新增
             if (match({TokenType::CLASS})) return parseClassDeclaration();
-            if (match({TokenType::FUNC})) return parseFuncDeclaration("function");
+            if (check(TokenType::FUNC) && !checkAhead({TokenType::FUNC, TokenType::LPAREN})) {
+                advance();
+                return parseFuncDeclaration("function");
+            }
             if (match({TokenType::VAR, TokenType::INT, TokenType::FLOAT, TokenType::BOOL, TokenType::STRING, TokenType::ARRAY, TokenType::DICT, TokenType::OBJECT})) {
                 return parseVarDeclaration(previous());
             }
@@ -1452,6 +1554,30 @@ private:
             return nullptr;
         }
     }
+
+    // 新增解析函数
+    StmtPtr parseImportStatement() {
+        int ln = previous().line;
+        Token path_token = consume(TokenType::STR, "Expect file path string after 'import'.");
+        auto path_expr = std::make_unique<LiteralExpr>(Value(StringData::from_literal(path_token.lexeme)), path_token.line);
+
+        consume(TokenType::AS, "Expect 'as' keyword after file path.");
+        Token alias = consume(TokenType::ID, "Expect module alias name after 'as'.");
+        consume(TokenType::SEMICOLON, "Expect ';' after import statement.");
+        return std::make_unique<ImportStmt>(std::move(path_expr), alias, ln);
+    }
+
+    // 新增解析函数
+    StmtPtr parseIncludeStatement() {
+        int ln = previous().line;
+        Token path_token = consume(TokenType::STR, "Expect file path string after 'include'.");
+        auto path_expr = std::make_unique<LiteralExpr>(Value(StringData::from_literal(path_token.lexeme)), path_token.line);
+
+        consume(TokenType::SEMICOLON, "Expect ';' after include statement.");
+        return std::make_unique<IncludeStmt>(std::move(path_expr), ln);
+    }
+
+    // ... 其他 parse 函数保持不变 ...
     std::unique_ptr<FuncStmt> parseFuncDeclaration(const std::string& kind);
     StmtPtr parseClassDeclaration();
     StmtPtr parseVarDeclaration(Token type_token);
@@ -1464,6 +1590,8 @@ private:
     std::unique_ptr<BlockStmt> parseBlock();
     StmtPtr parseReturnStatement();
     StmtPtr parseExprStatement();
+    StmtPtr parseThrowStatement();
+    StmtPtr parseTryStatement();
     ExprPtr parseExpression();
     ExprPtr parseAssignment();
     ExprPtr parseLogicalOr();
@@ -1475,9 +1603,13 @@ private:
     ExprPtr parseUnary();
     ExprPtr parseCall();
     ExprPtr parsePrimary();
+    ExprPtr parseFuncLiteral();
     ExprPtr parseArrayLiteral();
     ExprPtr parseDictLiteral();
 };
+
+// ... 其他 Parser 实现函数在这里 ...
+// ...
 
 std::unique_ptr<FuncStmt> Parser::parseFuncDeclaration(const std::string& kind) {
     int ln = previous().line;
@@ -1487,7 +1619,7 @@ std::unique_ptr<FuncStmt> Parser::parseFuncDeclaration(const std::string& kind) 
     if (!check(TokenType::RPAREN)) {
         do {
             ParamInfo param;
-            if (match({TokenType::INT, TokenType::FLOAT, TokenType::BOOL, TokenType::STRING, TokenType::ARRAY, TokenType::DICT, TokenType::OBJECT})) {
+            if (match({TokenType::INT, TokenType::FLOAT, TokenType::BOOL, TokenType::STRING, TokenType::ARRAY, TokenType::DICT, TokenType::OBJECT, TokenType::FUNC})) {
                 param.type = previous().type;
             }
             param.name = consume(TokenType::ID, "Expect parameter name.").lexeme;
@@ -1499,6 +1631,27 @@ std::unique_ptr<FuncStmt> Parser::parseFuncDeclaration(const std::string& kind) 
     auto body = parseBlock();
     return std::make_unique<FuncStmt>(name.lexeme, std::move(parameters), std::move(body), ln);
 }
+
+ExprPtr Parser::parseFuncLiteral() {
+    int ln = previous().line; // 'func' token
+    consume(TokenType::LPAREN, "Expect '(' after 'func' for function literal.");
+    std::vector<ParamInfo> parameters;
+    if (!check(TokenType::RPAREN)) {
+        do {
+            ParamInfo param;
+            if (match({TokenType::INT, TokenType::FLOAT, TokenType::BOOL, TokenType::STRING, TokenType::ARRAY, TokenType::DICT, TokenType::OBJECT, TokenType::FUNC})) {
+                param.type = previous().type;
+            }
+            param.name = consume(TokenType::ID, "Expect parameter name.").lexeme;
+            parameters.push_back(param);
+        } while (match({TokenType::COMMA}));
+    }
+    consume(TokenType::RPAREN, "Expect ')' after parameters.");
+    consume(TokenType::LBRACE, "Expect '{' before function literal body.");
+    auto body = parseBlock();
+    return std::make_unique<FuncLiteralExpr>(std::move(parameters), std::move(body), ln);
+}
+
 
 StmtPtr Parser::parseClassDeclaration() {
     int ln = previous().line;
@@ -1545,6 +1698,8 @@ StmtPtr Parser::parseStatement() {
     if (match({TokenType::RETURN})) return parseReturnStatement();
     if (match({TokenType::BREAK})) return parseBreakStatement();
     if (match({TokenType::CONTINUE})) return parseContinueStatement();
+    if (match({TokenType::THROW})) return parseThrowStatement();
+    if (match({TokenType::TRY})) return parseTryStatement();
     if (match({TokenType::SEMICOLON})) return nullptr;
     return parseExprStatement();
 }
@@ -1576,6 +1731,22 @@ StmtPtr Parser::parseReturnStatement() {
     }
     consume(TokenType::SEMICOLON, "Expect ';' after return value.");
     return std::make_unique<ReturnStmt>(std::move(value), ln);
+}
+StmtPtr Parser::parseThrowStatement() {
+    int ln = previous().line;
+    ExprPtr value = parseExpression();
+    consume(TokenType::SEMICOLON, "Expect ';' after throw value.");
+    return std::make_unique<ThrowStmt>(std::move(value), ln);
+}
+StmtPtr Parser::parseTryStatement() {
+    int ln = previous().line;
+    StmtPtr try_block = parseStatement(); // try can be followed by a single statement or a block
+    consume(TokenType::CATCH, "Expect 'catch' after try block.");
+    consume(TokenType::LPAREN, "Expect '(' after 'catch'.");
+    Token catch_variable = consume(TokenType::ID, "Expect variable name in catch clause.");
+    consume(TokenType::RPAREN, "Expect ')' after catch variable.");
+    StmtPtr catch_block = parseStatement(); // catch can also be a single statement or a block
+    return std::make_unique<TryStmt>(std::move(try_block), std::move(catch_variable), std::move(catch_block), ln);
 }
 std::unique_ptr<BlockStmt> Parser::parseBlock() {
     int ln = previous().line;
@@ -1707,6 +1878,9 @@ ExprPtr Parser::parsePrimary() {
         Token method = consume(TokenType::ID, "Expect superclass method name.");
         return std::make_unique<SuperExpr>(keyword, method, keyword.line);
     }
+    if (match({TokenType::FUNC})) {
+        return parseFuncLiteral();
+    }
     if (match({TokenType::ID, TokenType::INT, TokenType::FLOAT, TokenType::BOOL, TokenType::STRING, TokenType::DICT, TokenType::OBJECT})) {
         return std::make_unique<VarExpr>(previous().lexeme, previous().line);
     }
@@ -1795,7 +1969,131 @@ StmtPtr Parser::parseForStatement() {
     StmtPtr body = parseStatement();
     return std::make_unique<ForStmt>(std::move(initializer), std::move(condition), std::move(increment), std::move(body), for_line);
 }
+// 辅助函数，读取文件内容
+// 辅助函数，读取文件内容
+static std::string readFile(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file: " + path);
+    }
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
 
+std::optional<Value> IncludeStmt::exec(Environment& env) const {
+    static std::set<std::string> executed_files;
+    static std::unordered_map<std::string, StmtList> ast_cache; // 新增：用于保持AST存活
+
+    Value path_val = path->eval(env);
+    if (!path_val.is<StringData>()) {
+        throw RuntimeError(this->line, "include path must be a string.");
+    }
+    const std::string file_path = path_val.as<StringData>().get();
+
+    if (executed_files.count(file_path)) {
+        return std::nullopt; // 已经执行过，直接跳过
+    }
+
+    std::string source_code;
+    try {
+        source_code = readFile(file_path);
+    } catch (const std::runtime_error& e) {
+        throw RuntimeError(this->line, e.what());
+    }
+
+    try {
+        Lexer lexer(source_code);
+        auto tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto statements = parser.parse();
+
+        // 在当前环境中执行
+        for (const auto& stmt : statements) {
+            if (stmt) {
+                if (auto retVal = stmt->exec(env); retVal.has_value()) {
+                    throw RuntimeError(stmt->line, "Cannot return from an included file.");
+                }
+            }
+        }
+        
+        // 标记为已执行，并将AST移入缓存以保证其生命周期
+        executed_files.insert(file_path);
+        ast_cache[file_path] = std::move(statements);
+
+    } catch (const std::exception& e) {
+        throw RuntimeError(this->line, "Error executing included file '" + file_path + "': " + e.what());
+    }
+
+    return std::nullopt;
+}
+
+// 辅助结构体，用于保存模块的AST和环境
+struct LoadedModule {
+    StmtList ast;
+    std::shared_ptr<Environment> env;
+};
+
+std::optional<Value> ImportStmt::exec(Environment& env) const {
+    static std::unordered_map<std::string, std::shared_ptr<LoadedModule>> module_cache;
+
+    Value path_val = path->eval(env);
+    if (!path_val.is<StringData>()) {
+        throw RuntimeError(this->line, "import path must be a string.");
+    }
+    const std::string file_path = path_val.as<StringData>().get();
+
+    std::shared_ptr<LoadedModule> loaded_module;
+
+    if (module_cache.count(file_path)) {
+        loaded_module = module_cache.at(file_path);
+    } else {
+        std::string source_code;
+        try {
+            source_code = readFile(file_path);
+        } catch (const std::runtime_error& e) {
+            throw RuntimeError(this->line, e.what());
+        }
+
+        loaded_module = std::make_shared<LoadedModule>();
+        
+        // 关键修改：模块环境的父环境应该是全局环境
+        auto global_env = env.getGlobal();
+        loaded_module->env = std::make_shared<Environment>(global_env);
+        
+        try {
+            Lexer lexer(source_code);
+            auto tokens = lexer.tokenize();
+            Parser parser(std::move(tokens));
+            // 将解析出的AST移动到 loaded_module 中，以保证其生命周期
+            loaded_module->ast = parser.parse(); 
+
+            // 在新的、隔离的环境中执行
+            for (const auto& stmt : loaded_module->ast) {
+                if (stmt) {
+                    if (auto retVal = stmt->exec(*(loaded_module->env)); retVal.has_value()) {
+                         throw RuntimeError(stmt->line, "Cannot return from a module's top-level code.");
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            throw RuntimeError(this->line, "Error executing imported module '" + file_path + "': " + e.what());
+        }
+        
+        module_cache[file_path] = loaded_module;
+    }
+
+    // 创建模块对象
+    auto module_obj = std::make_shared<MutableObject>();
+    for (const auto& pair : loaded_module->env->get_all_variables()) {
+        module_obj->set(pair.first, pair.second.value);
+    }
+    
+    // 在当前环境中定义模块别名
+    env.define(alias.lexeme, Value(module_obj), std::nullopt);
+
+    return std::nullopt;
+}
 // ===================================================================
 // 8. 解释器 (Interpreter)
 // ===================================================================
@@ -1889,6 +2187,8 @@ public:
                     break;
                 }
             }
+        } catch (const ThrowSignal& signal) {
+            std::cerr << "Unhandled Exception: " << signal.thrown_value.toString() << std::endl;
         } catch (const RuntimeError& e) {
             std::cerr << e.what() << std::endl;
         } catch (const std::runtime_error& e) {
@@ -2268,65 +2568,38 @@ private:
 // ===================================================================
 // 9. 主函数 (Main)
 // ===================================================================
-int main() {
-    std::string_view program =
-R"CODE(
-
-    # minilang_primes.ml
-    func sieve(int n) {
-        var is_prime = [];
-        for (var i = 0; i <= n; i = i + 1) {
-            append(is_prime, true);
-        }
-        
-        is_prime[0] = false;
-        is_prime[1] = false;
-        
-        for (var p = 2; p * p <= n; p = p + 1) {
-            if (is_prime[p]) {
-                for (var i = p * p; i <= n; i = i + p) {
-                    is_prime[i] = false;
-                }
-            }
-        }
-        
-        int count = 0;
-        for (var i = 2; i <= n; i = i + 1) {
-            if (is_prime[i]) {
-                count = count + 1;
-            }
-        }
-        return count;
+int main(int argc, char* argv[]) {
+    std::string file_to_run = "";
+    if (argc > 1) {
+        file_to_run = argv[1];
     }
 
-    func main() {
-        int limit = 1000000;
-        print("MiniLang: Calculating primes up to", limit, "...");
-        
-        int start = clock();
-        int prime_count = sieve(limit);
-        int elapsed = clock() - start;
-        
-        print("Found", prime_count, "primes in", elapsed, "ms");
-    }
-
-    main();
-)CODE";
-
+    std::string source_code = "";
     try {
-        Lexer lexer(program);
-        auto tokens = lexer.tokenize();
-        Parser parser(std::move(tokens));
-        auto ast = parser.parse();
-        if (ast.empty() && !tokens.empty() && tokens[0].type != TokenType::END) {
-             std::cerr << "Parsing resulted in an empty AST. Check for parse errors." << std::endl;
-        }
-        Interpreter interpreter(std::move(ast));
-        interpreter.interpret();
+        // source_code = readFile(file_to_run);
+        source_code = R"CODE(
+            func FakeInput() {
+                return "LOL It's FakeInput";
+            }
+            input = FakeInput;
+            print(input());  
+        )CODE";
     } catch (const std::exception& e) {
         std::cerr << "Fatal Error: " << e.what() << std::endl;
         return 1;
     }
-
+    
+    try {
+        Lexer lexer(source_code);
+        auto tokens = lexer.tokenize();
+        Parser parser(std::move(tokens));
+        auto ast = parser.parse();
+        
+        Interpreter interpreter(std::move(ast));
+        interpreter.interpret();
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal Error (unhandled C++ exception): " << e.what() << std::endl;
+        return 1;
+    }
     return 0;
 }
